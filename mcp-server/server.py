@@ -1,23 +1,17 @@
 import os
 from datetime import datetime
+import httpx
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-
-# Импортируем нашу базу
 from db import get_db
 
-# Создаем MCP сервер (в v2 FastMCP переименован в MCPServer)
 mcp = MCPServer("HR-Leaves")
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-
-def parse_date(date_str: str) -> datetime:
+def parse_date(date_str):
     try:
         return datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
         raise ToolError(f"Дата должна быть в формате YYYY-MM-DD, получено: {date_str}")
-
-# --- ИНСТРУМЕНТЫ (TOOLS) ---
 
 @mcp.tool()
 def list_leave_requests(department: str = None, status: str = None) -> str:
@@ -102,30 +96,61 @@ def cancel_leave_request(request_id: int) -> str:
         conn.commit()
     return f"Заявка №{request_id} успешно отменена."
 
-# --- РЕСУРСЫ (RESOURCES) ---
+@mcp.tool()
+async def get_currency_rate(currency: str = "USD") -> str:
+    """Получает актуальный курс валюты."""
+    base_url = os.getenv("CURRENCY_API_BASE", "https://mocks.academy.sharapov.biz/er-api/v6/latest")
+    url = f"{base_url}/{currency.upper()}"
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, headers={"User-Agent": "HR-App/1.0"})
+            response.raise_for_status()
+            data = response.json()
+            rub_rate = data.get("rates", {}).get("RUB")
+            
+            if rub_rate:
+                return f"Курс {currency.upper()} к RUB: {rub_rate:.2f}."
+            return f"Курс {currency.upper()} не найден."
+    except Exception as e:
+        raise ToolError(f"Ошибка получения курса: {str(e)}")
+
+@mcp.tool()
+async def get_weather_for_leave(date: str) -> str:
+    """Получает прогноз погоды на дату отпуска."""
+    url = "https://mocks.academy.sharapov.biz/open-meteo/v1/forecast"
+    params = {"latitude": 55.75, "longitude": 37.62, "daily": "temperature_2m_max,temperature_2m_min", "timezone": "Europe/Moscow"}
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, params=params, headers={"User-Agent": "HR-App/1.0"})
+            response.raise_for_status()
+            data = response.json()
+            dates = data.get("daily", {}).get("time", [])
+            max_t = data.get("daily", {}).get("temperature_2m_max", [])
+            min_t = data.get("daily", {}).get("temperature_2m_min", [])
+            
+            if date in dates:
+                idx = dates.index(date)
+                return f"Погода на {date}: от {min_t[idx]} до {max_t[idx]} градусов."
+            return f"Прогноз на {date} недоступен."
+    except Exception as e:
+        raise ToolError(f"Ошибка получения погоды: {str(e)}")
 
 @mcp.resource("leaves://requests")
 def get_requests_resource() -> str:
-    """Возвращает список всех заявок (для панели)."""
+    """Возвращает список всех заявок."""
     with get_db() as conn:
-        rows = conn.execute("""
-            SELECT r.id, e.full_name, r.date_start, r.date_end, r.status
-            FROM leave_requests r JOIN employees e ON r.employee_id = e.id
-        """).fetchall()
+        rows = conn.execute("SELECT r.id, e.full_name, r.status FROM leave_requests r JOIN employees e ON r.employee_id = e.id").fetchall()
     return "\n".join([f"#{r['id']} - {r['full_name']} ({r['status']})" for r in rows])
 
 @mcp.resource("leaves://reference")
 def get_reference_resource() -> str:
-    """Возвращает справочник отделов и категорий."""
+    """Возвращает справочник."""
     with get_db() as conn:
         deps = conn.execute("SELECT name FROM departments").fetchall()
-        cats = conn.execute("SELECT name, priority FROM categories").fetchall()
-    dep_str = ", ".join([d['name'] for d in deps])
-    cat_str = ", ".join([f"{c['name']} (приоритет {c['priority']})" for c in cats])
-    return f"Отделы: {dep_str}\nКатегории: {cat_str}"
-
-# --- ЗАПУСК ---
+        cats = conn.execute("SELECT name FROM categories").fetchall()
+    return f"Отделы: {', '.join([d['name'] for d in deps])}\nКатегории: {', '.join([c['name'] for c in cats])}"
 
 if __name__ == "__main__":
-    # Запускаем сервер через SSE (по умолчанию порт 8000)
-    mcp.run(transport="sse")
+    mcp.run(transport="streamable-http")

@@ -1,0 +1,1 @@
+export const NEEDS_APPROVAL = ["cancel_leave_request"];
