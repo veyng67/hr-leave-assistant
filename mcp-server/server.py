@@ -1,9 +1,9 @@
 import os
 from datetime import datetime
 import httpx
+from db import get_db
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from db import get_db
 
 mcp = MCPServer("HR-Leaves")
 
